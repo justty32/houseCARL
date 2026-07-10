@@ -129,6 +129,9 @@ public static class CiAll
         ("asset-resolver-guard", AssetResolverProbe.RunGuard),
         // Dialogue text-encoding lint: only a char Windows-1252 cannot hold is destroyed; one it holds is byte-correct.
         ("dialogue-encoding-guard", DialogueEncodingProbe.RunGuard),
+        // Case-insensitive loose paths + INI discovery: on a case-sensitive filesystem a caller's (or a hardcoded)
+        // casing must not decide what exists. Passes trivially on Windows — it pins behaviour that is free there.
+        ("case-insensitive-asset-guard", CaseInsensitiveAssetProbe.RunGuard),
         ("asset-status-guard", AssetStatusProbe.RunGuard),
         // SKSE-plugin-layer visibility (gap 2026-06-08, tier C): pins the SKSEPlugin_Version decode contract (the
         // reverse-engineered offset map — supportEmail is 252, not 256 — + the flag/version/compat interpretation) and

@@ -51,6 +51,10 @@ if (args.Length > 0 && args[0] == "script-property-check-guard") return ScriptPr
 // hold is destroyed. The two must not be reported as one "likely mojibake" claim.
 if (args.Length > 0 && args[0] == "dialogue-encoding-guard") return DialogueEncodingProbe.RunGuard(args[1..]);
 
+// Loose-path + INI casing: the engine/Wine/MO2 resolve Data-relative paths case-insensitively, so neither a
+// caller's casing nor a hardcoded one may decide what exists on a case-sensitive filesystem.
+if (args.Length > 0 && args[0] == "case-insensitive-asset-guard") return CaseInsensitiveAssetProbe.RunGuard(args[1..]);
+
 // Decompiler baseline hierarchy: emit vanilla-class-parents.json from the CK vanilla sources' own
 // ScriptName-extends headers (committed asset — vanilla sources don't exist on CI; regenerate on game updates).
 if (args.Length > 0 && args[0] == "class-parents") return ClassParentsEmitter.Run(args[1..]);

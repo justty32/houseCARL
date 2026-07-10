@@ -112,15 +112,20 @@ public sealed class AssetResolver : IDisposable
         { Tables = tables; Mtimes = mtimes; Failures = failures; LooseCache = new(StringComparer.OrdinalIgnoreCase); }
     }
 
-    /// <summary>One subtree directory's loose resolution, warmed on first touch. <see cref="Present"/> = the filename
-    /// sets of the roots that HAVE that subtree (in <see cref="_looseRoots"/> precedence order); <see cref="DirMtimes"/>
-    /// = the mtime of EVERY root's copy of the subtree dir (MinValue if absent), so RefreshIfStale catches a content
-    /// change to an existing dir AND a root gaining or losing the subtree.</summary>
+    /// <summary>One subtree directory's loose resolution, warmed on first touch. <see cref="Present"/> = the roots that
+    /// HAVE that subtree (in <see cref="_looseRoots"/> precedence order), each with the subtree's REAL on-disk directory
+    /// and a map from queried filename to the real on-disk filename; <see cref="DirMtimes"/> = the mtime of EVERY root's
+    /// copy of the subtree dir (MinValue if absent), so RefreshIfStale catches a content change to an existing dir AND a
+    /// root gaining or losing the subtree. <see cref="StatDirs"/> is the path each mtime was taken from (parallel to the
+    /// roots) — the resolved dir where one exists, else the literal probe path — so the staleness re-stat and the warm
+    /// describe the same file, which on a case-sensitive filesystem the query's own casing must never decide.</summary>
     internal sealed class LooseSubtree
     {
         public readonly DateTime[] DirMtimes;                         // parallel to _looseRoots (length == root count)
-        public readonly (int RootIndex, HashSet<string> Files)[] Present;   // roots that have the dir + ≥1 file, precedence order
-        public LooseSubtree(DateTime[] dirMtimes, (int, HashSet<string>)[] present) { DirMtimes = dirMtimes; Present = present; }
+        public readonly string[] StatDirs;                            // parallel to _looseRoots — the path DirMtimes[i] was read from
+        public readonly (int RootIndex, string Dir, Dictionary<string, string> Files)[] Present;   // roots that have the dir + ≥1 file, precedence order
+        public LooseSubtree(DateTime[] dirMtimes, string[] statDirs, (int, string, Dictionary<string, string>)[] present)
+        { DirMtimes = dirMtimes; StatDirs = statDirs; Present = present; }
     }
 
     volatile Snapshot _snap;
@@ -301,14 +306,14 @@ public sealed class AssetResolver : IDisposable
     List<PlacementSource> ResolveProviders(string rel, Snapshot snap)
     {
         // ---- loose, in MO2 precedence order — via the per-subtree cache (warmed on first touch) ----
-        var subtreeDir = Normalize(Path.GetDirectoryName(rel) ?? "");
-        var fname = Path.GetFileName(rel);
+        var subtreeDir = AssetDirName(rel);
+        var fname = AssetFileName(rel);
         var st = snap.LooseCache.GetOrAdd(subtreeDir, WarmSubtree);
         var loose = new List<PlacementSource>();
-        foreach (var (rootIndex, files) in st.Present)               // Present is already in precedence order
-            if (files.Contains(fname))
+        foreach (var (rootIndex, dir, files) in st.Present)          // Present is already in precedence order
+            if (files.TryGetValue(fname, out var realName))          // real on-disk casing — the path must OPEN, not just match
                 loose.Add(new PlacementSource(_looseRoots[rootIndex].Name, AssetKind.Loose,
-                    LooseFilePath: Path.Combine(_looseRoots[rootIndex].Dir, rel), ArchivePath: null, EntryPath: rel));
+                    LooseFilePath: Path.Combine(dir, realName), ArchivePath: null, EntryPath: rel));
 
         // ---- BSA, highest plugin rank first ----
         var bsa = new List<(PlacementSource source, int rank)>();
@@ -371,8 +376,8 @@ public sealed class AssetResolver : IDisposable
         // loose: recurse each root's copy of the prefix dir (set-UNION across roots — the per-path winner is decided later).
         foreach (var (_, rootDir) in _looseRoots)
         {
-            var baseDir = Path.Combine(rootDir, pre);
-            if (!Directory.Exists(baseDir)) continue;
+            var baseDir = ResolveExistingDir(rootDir, pre);              // the query's casing must not decide what exists
+            if (baseDir is null) continue;
             try
             {
                 foreach (var f in Directory.EnumerateFiles(baseDir, "*", SearchOption.AllDirectories))
@@ -454,12 +459,8 @@ public sealed class AssetResolver : IDisposable
     /// roots) — RefreshIfStale is called per query-batch, not per path.</summary>
     bool LooseSubtreeStale(string subtreeDir, LooseSubtree st)
     {
-        var roots = _looseRoots;
-        for (int i = 0; i < roots.Count; i++)
-        {
-            var dir = subtreeDir.Length == 0 ? roots[i].Dir : Path.Combine(roots[i].Dir, subtreeDir);
-            if (SafeMtime(dir) != st.DirMtimes[i]) return true;
-        }
+        for (int i = 0; i < st.StatDirs.Length; i++)
+            if (SafeMtime(st.StatDirs[i]) != st.DirMtimes[i]) return true;   // re-stat the SAME path the warm measured
         return false;
     }
 
@@ -471,27 +472,75 @@ public sealed class AssetResolver : IDisposable
     {
         var roots = _looseRoots;
         var mtimes = new DateTime[roots.Count];
-        var present = new List<(int, HashSet<string>)>();
+        var statDirs = new string[roots.Count];
+        var present = new List<(int, string, Dictionary<string, string>)>();
         for (int i = 0; i < roots.Count; i++)
         {
-            var dir = subtreeDir.Length == 0 ? roots[i].Dir : Path.Combine(roots[i].Dir, subtreeDir);
+            // The cache key is compared OrdinalIgnoreCase, so WHICHEVER casing a caller asked for first lands here —
+            // resolve it to the real directory rather than let that casing decide the answer on a case-sensitive
+            // filesystem (a lowercase "scripts\" probe would otherwise hide every mod's real "Scripts\" from the
+            // whole subtree, for this snapshot's lifetime).
+            var literal = subtreeDir.Length == 0 ? roots[i].Dir : Path.Combine(roots[i].Dir, NativeRelPath(subtreeDir));
+            var dir = ResolveExistingDir(roots[i].Dir, subtreeDir) ?? literal;   // literal = the absent-baseline probe path
+            statDirs[i] = dir;
             mtimes[i] = SafeMtime(dir);                              // MinValue if absent — baseline for an appear/disappear
-            var files = SafeListFilenames(dir);
-            if (files is { Count: > 0 }) present.Add((i, files));
+            var files = SafeListFileMap(dir);
+            if (files is { Count: > 0 }) present.Add((i, dir, files));
         }
-        return new LooseSubtree(mtimes, present.ToArray());
+        return new LooseSubtree(mtimes, statDirs, present.ToArray());
     }
 
-    /// <summary>The top-level filenames in a directory (OrdinalIgnoreCase), or null if it doesn't exist / can't be read.
-    /// Top-level only — a "subtree" here is the immediate parent dir of the queried asset, not a recursive tree.</summary>
-    static HashSet<string>? SafeListFilenames(string dir)
+    /// <summary>The REAL on-disk directory for a Data-relative subtree under <paramref name="rootDir"/>, or null if no
+    /// casing of it exists. The literal path is tried first — on Windows (and on any query whose casing already matches)
+    /// that is the whole cost, so this is free on the platform the format assumes. Only on a miss does it walk the
+    /// segments, matching each against the directory's real children OrdinalIgnoreCase: the engine, the BSA tables and
+    /// MO2's VFS are all case-insensitive, and a mod folder carries whatever casing its author's archive happened to
+    /// have, so a Linux install must resolve <c>SEQ\</c> onto a real <c>Seq\</c> exactly as the game does. A root that
+    /// won't enumerate yields null — the caller treats that as absent, and the incomplete-read flags already say so.</summary>
+    static string? ResolveExistingDir(string rootDir, string subtreeDir)
+    {
+        if (subtreeDir.Length == 0) return Directory.Exists(rootDir) ? rootDir : null;
+
+        var literal = Path.Combine(rootDir, NativeRelPath(subtreeDir));
+        if (Directory.Exists(literal)) return literal;               // fast path: exact casing (always taken on Windows)
+        if (!Directory.Exists(rootDir)) return null;
+
+        var cur = rootDir;
+        foreach (var seg in NativeRelPath(subtreeDir).Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var exact = Path.Combine(cur, seg);
+            if (Directory.Exists(exact)) { cur = exact; continue; }
+
+            string? hit = null;
+            try
+            {
+                foreach (var child in Directory.EnumerateDirectories(cur))
+                    if (string.Equals(Path.GetFileName(child), seg, StringComparison.OrdinalIgnoreCase)) { hit = child; break; }
+            }
+            catch { return null; }                                   // unreadable root contributes nothing (see the summary)
+            if (hit is null) return null;
+            cur = hit;
+        }
+        return cur;
+    }
+
+    /// <summary>The top-level filenames in a directory, keyed OrdinalIgnoreCase and mapped to their REAL on-disk casing,
+    /// or null if it doesn't exist / can't be read. The map (rather than a set) is what lets a case-insensitive HIT still
+    /// produce a path that opens on a case-sensitive filesystem. Top-level only — a "subtree" here is the immediate parent
+    /// dir of the queried asset, not a recursive tree. Two files differing only in case (legal on Linux, impossible under
+    /// the engine's own VFS) collapse to the first enumerated — the same ambiguity MO2 itself resolves arbitrarily.</summary>
+    static Dictionary<string, string>? SafeListFileMap(string dir)
     {
         try
         {
             if (!Directory.Exists(dir)) return null;
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var f in Directory.EnumerateFiles(dir)) set.Add(Path.GetFileName(f));
-            return set;
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in Directory.EnumerateFiles(dir))
+            {
+                var name = Path.GetFileName(f);
+                map.TryAdd(name, name);
+            }
+            return map;
         }
         catch { return null; }
     }
@@ -500,6 +549,27 @@ public sealed class AssetResolver : IDisposable
     /// OrdinalIgnoreCase (Windows + BSA tables are case-insensitive), so case is left as-is and compared case-insensitively.
     /// Lenient — applied to BSA-table entries (already archive-relative), so it never throws.</summary>
     static string Normalize(string p) => (p ?? "").Replace('/', '\\').TrimStart('\\');
+
+    /// <summary>Convert the resolver's canonical Data-relative path (backslash-separated for BSA/table matching) to an
+    /// OS-native relative path before touching the loose filesystem. On Linux, a backslash is a literal filename character,
+    /// not a separator; without this, loose lookups for e.g. <c>SKSE\Plugins</c> miss real <c>SKSE/Plugins</c> folders.</summary>
+    static string NativeRelPath(string rel) => rel.Replace('\\', Path.DirectorySeparatorChar);
+
+    /// <summary>Directory component for the resolver's canonical backslash-separated Data-relative path. Do not use
+    /// <see cref="Path.GetDirectoryName(string?)"/> here: on Unix, backslash is a literal filename character.</summary>
+    static string AssetDirName(string rel)
+    {
+        int i = rel.LastIndexOf('\\');
+        return i < 0 ? "" : rel[..i];
+    }
+
+    /// <summary>Filename component for the resolver's canonical backslash-separated Data-relative path. Do not use
+    /// <see cref="Path.GetFileName(string?)"/> here: on Unix, backslash is a literal filename character.</summary>
+    static string AssetFileName(string rel)
+    {
+        int i = rel.LastIndexOf('\\');
+        return i < 0 ? rel : rel[(i + 1)..];
+    }
 
     /// <summary>Public, reusable gate: normalize + VALIDATE a Data-relative path, REJECTING a drive-rooted or
     /// parent-escaping one — the SAME check <see cref="Resolve"/> applies (it delegates to <see cref="NormalizeQueryPath"/>),
