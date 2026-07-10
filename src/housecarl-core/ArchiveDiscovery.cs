@@ -136,9 +136,10 @@ public static class ArchiveDiscovery
         if (profileDir.Length > 0) candidates.Add(Path.Combine(profileDir, "Skyrim.ini"));
         if (gamePath.Length > 0) candidates.Add(Path.Combine(gamePath, "Skyrim.ini"));
 
-        foreach (var ini in candidates)
+        foreach (var probe in candidates)
         {
-            if (!File.Exists(ini)) continue;
+            var ini = ResolveExistingFile(probe);                    // MO2-on-Linux writes 'skyrim.ini'; the game is case-blind
+            if (ini is null) continue;
             var names = ParseResourceArchiveList(ini);
             if (names.Count > 0) return names;   // first Skyrim.ini that actually lists archives wins
         }
@@ -149,6 +150,26 @@ public static class ArchiveDiscovery
             "etc.) are NOT in the asset scan, so an asset present ONLY in a vanilla archive may read as absent. " +
             "If your MO2 uses profile-specific INIs, make sure the active profile has a Skyrim.ini.");
         return Array.Empty<string>();
+    }
+
+    /// <summary>The REAL on-disk path for <paramref name="probe"/>, or null if no casing of its filename exists in the
+    /// containing directory. Exact match first — on Windows that is the whole cost. Only on a miss does it scan the
+    /// directory OrdinalIgnoreCase: MO2 running under Wine writes the profile's game INI as <c>skyrim.ini</c>, and Wine
+    /// serves it case-insensitively to the game, so a native-Linux read must do the same or it silently concludes the
+    /// profile has no INI and drops every base-game BSA from the asset scan.</summary>
+    static string? ResolveExistingFile(string probe)
+    {
+        if (File.Exists(probe)) return probe;
+        var dir = Path.GetDirectoryName(probe);
+        var name = Path.GetFileName(probe);
+        if (string.IsNullOrEmpty(dir) || name.Length == 0 || !Directory.Exists(dir)) return null;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(dir))
+                if (string.Equals(Path.GetFileName(f), name, StringComparison.OrdinalIgnoreCase)) return f;
+        }
+        catch { /* unreadable dir → treat as absent; the caller's LOUD warning already covers the consequence */ }
+        return null;
     }
 
     /// <summary>Parse a Skyrim.ini's [Archive] section for sResourceArchiveList + sResourceArchiveList2, returning

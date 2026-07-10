@@ -300,10 +300,10 @@ public sealed class LoadOrderService : IDisposable
                 else note = "provided ONLY inside a BSA — the SKSE loader scans loose Data\\SKSE\\Plugins only, so this DLL will not load";
                 if (group.Length > 0 && note is null)
                     note = $"in subfolder '{group}' — NOT on SKSE's loader path (scans SKSE\\Plugins\\*.dll top-level only); a bundled/parent-loaded DLL, not a plugin SKSE loads";
-                dlls.Add(new SkseFileEntry(rel, Path.GetFileName(rel), group, providers, info, note));
+                dlls.Add(new SkseFileEntry(rel, AssetFileName(rel), group, providers, info, note));
             }
             else
-                configs.Add(new SkseFileEntry(rel, Path.GetFileName(rel), group, providers, null, null));
+                configs.Add(new SkseFileEntry(rel, AssetFileName(rel), group, providers, null, null));
         }
         return new SkseInventoryData(dlls, configs, otherFiles, view.BsaFailures, view.ReadIncomplete, warnings, profileName);
     }
@@ -429,6 +429,33 @@ public sealed class LoadOrderService : IDisposable
     /// cap)", never the self-contradictory "16 MB (> 16 MB cap)" an integer-MB divide produced.</summary>
     static string OverCapNote(long len) =>
         $"config is {len / (1024.0 * 1024):0.0} MB (> {SkseConfigSizeCap / (1024 * 1024)} MB cap) — not scanned";
+
+    /// <summary>Filename component for houseCARL's canonical Data-relative asset paths, which use backslashes even on Unix.</summary>
+    static string AssetFileName(string rel)
+    {
+        int i = rel.LastIndexOf('\\');
+        return i < 0 ? rel : rel[(i + 1)..];
+    }
+
+    /// <summary>True iff <paramref name="modRoot"/> ships <c>SEQ\&lt;stem&gt;.seq</c>, matching BOTH the folder and the
+    /// filename case-insensitively. This is the merge path's FALLBACK gate — it runs precisely when the asset layer (which
+    /// resolves casing for us) could not be built, so it cannot delegate. The engine, Wine and MO2's VFS are all case-blind
+    /// and authoring tools disagree on the folder's casing (the CK writes <c>Seq</c>, this codebase writes <c>SEQ</c>); an
+    /// exact-case probe on a case-sensitive filesystem would report "the donors shipped no .seq" over a .seq that is right
+    /// there, and silently skip the refresh the fallback exists to guarantee.</summary>
+    static bool SeqExistsBeside(string modRoot, string stem)
+    {
+        try
+        {
+            var seqDir = Directory.EnumerateDirectories(modRoot)
+                .FirstOrDefault(d => string.Equals(Path.GetFileName(d), "SEQ", StringComparison.OrdinalIgnoreCase));
+            if (seqDir is null) return false;
+            var want = stem + ".seq";
+            return Directory.EnumerateFiles(seqDir)
+                .Any(f => string.Equals(Path.GetFileName(f), want, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
 
     // ---- SkyPatcher distributor Wave 1: the per-record TRUE post-SkyPatcher state (plan
     //      dev/plans/SKYPATCHER_DISTRIBUTOR_TOOL_PLAN_2026-07-08.md — reader-only scope, 2026-07-09). ----
@@ -3160,7 +3187,7 @@ public sealed class LoadOrderService : IDisposable
             // loose per-donor-folder check, so an asset-layer fault can't silently downgrade a donor-shipped .seq to
             // "the donors shipped none" and skip the refresh with a factually wrong advisory (compact's ?? discipline).
             bool anyDonorSeq = seqGate ?? donorInfos.Any(d =>
-                File.Exists(Path.Combine(Path.GetDirectoryName(d.Path)!, "SEQ", Path.GetFileNameWithoutExtension(d.Name) + ".seq")));
+                SeqExistsBeside(Path.GetDirectoryName(d.Path)!, Path.GetFileNameWithoutExtension(d.Name)));
 
             // ---- 8. SEQ — refresh-only, off the merged plugin: rebuilt when ANY donor shipped a .seq (all their SGE
             //      quests now live in M, whose .seq must list the NEW on-disk FormIDs); donors with SGE quests but no
