@@ -127,6 +127,8 @@ public static class CiAll
         // OWN cold ci.yml step instead, where its timing assumption holds. The other 55 probes co-host cleanly.
         ("overwrite-resolve-guard", OverwriteResolveProbe.RunGuard),
         ("asset-resolver-guard", AssetResolverProbe.RunGuard),
+        // Dialogue text-encoding lint: only a char Windows-1252 cannot hold is destroyed; one it holds is byte-correct.
+        ("dialogue-encoding-guard", DialogueEncodingProbe.RunGuard),
         ("asset-status-guard", AssetStatusProbe.RunGuard),
         // SKSE-plugin-layer visibility (gap 2026-06-08, tier C): pins the SKSEPlugin_Version decode contract (the
         // reverse-engineered offset map — supportEmail is 252, not 256 — + the flag/version/compat interpretation) and

@@ -285,8 +285,10 @@ public static class DialogueValidate
         var scriptFindings = new List<ScriptBindingFinding>();
 
         // Text-encoding lint (item 1): flag non-ASCII in the player-facing strings — the topic Name (once), each
-        // INFO Prompt, and each spoken response Text — because the CK/Papyrus user-facing text surface is
-        // effectively Windows-1252/ASCII, so an em-dash, ellipsis, or smart quote renders as in-game mojibake.
+        // INFO Prompt, and each spoken response Text — against the Windows-1252 surface the engine reads a
+        // non-localized plugin's inline strings with. Chars that codepage CANNOT hold are destroyed ('?'); chars it
+        // CAN hold (em-dash, ellipsis, smart quote, é) are byte-correct and only raise a font-glyph question — the
+        // two are reported separately, because conflating them cries mojibake over text that is perfectly fine.
         // WARN only (a heuristic — HTML/Ultralight UIs render Unicode fine) and REPORT-ONLY (this validator never
         // mutates; it suggests the ASCII substitute, never performs it).
         CheckEncoding(topic.Name?.String, $"DialogTopic.Name ({edid})", issues);
@@ -535,23 +537,64 @@ public static class DialogueValidate
         ['•'] = "*",    // bullet
     };
 
-    /// <summary>Text-encoding lint (item 1): if <paramref name="s"/> carries any non-ASCII char (&gt; 0x7F), add ONE
-    /// WARNING for this <paramref name="locus"/> naming the offending char(s) and the ASCII substitute where known.
-    /// The CK/Papyrus user-facing surface is effectively Windows-1252/ASCII, so these usually render as in-game
-    /// mojibake. WARN, never blocks (heuristic); REPORT-ONLY (the validator is read-only — it never rewrites the
-    /// string). A bare "invalid" is never emitted: the message names exactly which characters and what to use (Q3).</summary>
-    static void CheckEncoding(string? s, string locus, List<DialogueIssue> issues)
+    /// <summary>The 27 defined Windows-1252 characters in the 0x80–0x9F range — the ONLY chars above ASCII that
+    /// codepage adds beyond Latin-1's 0xA0–0xFF. (0x81, 0x8D, 0x8F, 0x90 and 0x9D are undefined in cp1252 and so are
+    /// absent here.) Used by <see cref="IsWindows1252"/>; hardcoded rather than reached through
+    /// <c>Encoding.GetEncoding(1252)</c>, which needs a CodePages provider registered on non-Windows.</summary>
+    static readonly HashSet<char> Cp1252HighRange = new(
+        "€‚ƒ„…†‡ˆ‰Š‹ŒŽ" +
+        "‘’“”•–—˜™š›œžŸ");
+
+    /// <summary>True iff <paramref name="c"/> survives a round trip through Windows-1252 — the encoding the engine reads
+    /// a non-localized plugin's inline strings with. An em-dash, ellipsis, smart quote or accented Latin letter DOES:
+    /// it is one byte on disk (0x97, 0x85, 0x92, 0xE9 …) and no encoding step can corrupt it. A char outside cp1252
+    /// (CJK, an emoji, a C1 control) does NOT: the write path has no byte for it, so it becomes '?'.</summary>
+    static bool IsWindows1252(char c) => c <= 0x7F || (c >= 0xA0 && c <= 0xFF) || Cp1252HighRange.Contains(c);
+
+    /// <summary>Text-encoding lint (item 1): flag non-ASCII chars in a player-facing string, SPLIT by what the encoding
+    /// can actually promise — the distinction that decides whether a finding is a defect or a note:
+    /// <list type="bullet">
+    /// <item>NOT representable in Windows-1252 (CJK, emoji, a C1 control) — the write path has no byte for it, so the
+    /// engine's surface DESTROYS it (it becomes '?'), and a C1 control here is usually UTF-8 bytes already misdecoded.
+    /// A provable defect.</item>
+    /// <item>Representable but non-ASCII (em-dash, ellipsis, smart quote, é) — the plugin's bytes are correct and NO
+    /// encoding fault exists. It is reported only because the in-game font may lack the glyph, which houseCARL cannot
+    /// check; the ASCII substitute is offered, not demanded.</item>
+    /// </list>
+    /// Both are WARN, never blocking (heuristic), and REPORT-ONLY (the validator never rewrites the string). A bare
+    /// "invalid" is never emitted: each message names exactly which characters, why, and what to use (Q3).
+    /// internal so the encoding guard drives the classifier directly, without a load order (see InternalsVisibleTo.cs).</summary>
+    internal static void CheckEncoding(string? s, string locus, List<DialogueIssue> issues)
     {
         if (string.IsNullOrEmpty(s)) return;
-        var offenders = new List<char>();
-        foreach (var ch in s) if ((int)ch > 0x7F && !offenders.Contains(ch)) offenders.Add(ch);
-        if (offenders.Count == 0) return;
+        var lost = new List<char>();        // cp1252 has no byte for these — corrupted for certain
+        var kept = new List<char>();        // valid cp1252, non-ASCII — a glyph question, not an encoding one
+        foreach (var ch in s)
+        {
+            if ((int)ch <= 0x7F) continue;
+            var bucket = IsWindows1252(ch) ? kept : lost;
+            if (!bucket.Contains(ch)) bucket.Add(ch);
+        }
 
-        var desc = string.Join(", ", offenders.Select(c => $"U+{(int)c:X4} '{c}'"));
-        var subs = offenders.Where(AsciiSubstitute.ContainsKey).Select(c => $"'{c}'->\"{AsciiSubstitute[c]}\"").ToList();
-        var sug = subs.Count > 0 ? $" Suggested ASCII: {string.Join(", ", subs)}." : "";
-        issues.Add(new(DialogueIssueSeverity.Warning,
-            $"{locus} contains non-ASCII char(s) {desc} — the CK/Papyrus user-facing text surface is Windows-1252/ASCII, so these usually render as in-game mojibake.{sug}"));
+        if (lost.Count > 0)
+            issues.Add(new(DialogueIssueSeverity.Warning,
+                $"{locus} contains char(s) {Describe(lost)} that Windows-1252 cannot represent — the CK/Papyrus " +
+                "user-facing text surface encodes to that codepage, so they are destroyed (written as '?'). If they " +
+                "look like Latin letters with accents, the source text is UTF-8 bytes already misdecoded." + Suggest(lost)));
+
+        if (kept.Count > 0)
+            issues.Add(new(DialogueIssueSeverity.Warning,
+                $"{locus} contains non-ASCII char(s) {Describe(kept)} that ARE valid Windows-1252 — the bytes on disk " +
+                "are correct and will NOT mojibake. Flagged only because houseCARL cannot check whether the in-game " +
+                "font carries the glyph; substitute if you want certainty." + Suggest(kept)));
+
+        static string Describe(List<char> cs) => string.Join(", ", cs.Select(c => $"U+{(int)c:X4} '{c}'"));
+
+        static string Suggest(List<char> cs)
+        {
+            var subs = cs.Where(AsciiSubstitute.ContainsKey).Select(c => $"'{c}'->\"{AsciiSubstitute[c]}\"").ToList();
+            return subs.Count > 0 ? $" Suggested ASCII: {string.Join(", ", subs)}." : "";
+        }
     }
 
     /// <summary>The <c>&lt;Global=X&gt;</c> text-replacement tags in a Prompt/response — the engine substitutes each

@@ -27,7 +27,9 @@ public static class DialogueTools
          "topic's lines by their conditions, not a previous-link chain), so absence is never flagged; plus (reusing " +
          "the create-time teeth over every existing line) each voiced line has its .fuz on disk and each result " +
          "script is bound + compiled; non-ASCII characters in the player-facing text (topic name, line prompt, " +
-         "response text) are flagged as likely in-game mojibake (the CK/Papyrus surface is Windows-1252/ASCII); " +
+         "response text) are flagged against the Windows-1252 surface the engine reads inline strings with — chars " +
+         "that codepage cannot hold are destroyed ('?'), while chars it can hold (em-dash, smart quote, e-acute) are " +
+         "byte-correct and reported only as a font-glyph question, never as mojibake; " +
          "and each line's CTDA conditions are statically checked for a meaningful subset of MALFORMED shapes (a " +
          "dangling form reference, a dead quest-alias index, an unset Run On reference, GetIsID pointed at a placed " +
          "instance). It LOUDLY declares what it still cannot verify — it cannot EVALUATE whether a WELL-FORMED " +
