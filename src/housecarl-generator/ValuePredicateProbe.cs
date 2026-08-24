@@ -13,7 +13,9 @@ namespace HousecarlGenerator;
 /// MEMORY with KNOWN field values, runs the product evaluator (<see cref="FieldPredicateSet"/>), and asserts the
 /// matched set EQUALS a brute-force reference computed independently from those known literals (plain C#
 /// comparisons over the stored values — NOT the read walk), so a drift in the path-walk, the token comparison,
-/// or the operator parse fails loud.
+/// or the operator parse fails loud. It also drives one-list-wildcard expansion end to end: numeric, FormKey,
+/// string, bitwise, and presence predicates all use existential ANY semantics; empty/absent lists, wrong suffixes,
+/// non-list wildcard targets, and malformed/multiple wildcard syntax retain named Q3 outcomes.
 ///
 /// It locks in the load-bearing Q3 teeth: a wrong path reads no value EVERYWHERE and is surfaced LOUD (never a
 /// silent "0 matches"); a numeric operator on a non-numeric field is a fast typed error; <c>=</c> on a float
@@ -41,6 +43,13 @@ public static class ValuePredicateProbe
     /// independent ground truth for the bitwise <c>has</c> / flags-aware compare (the brute force ANDs these bits,
     /// never the record).</summary>
     sealed record Armo(IArmorGetter Rec, ulong Bits)
+    {
+        public FormKey Fk => Rec.FormKey;
+    }
+
+    /// <summary>One synthesized Spell plus the literal effect values used to build it — independent wildcard
+    /// ground truth (the expectations below read these arrays, never the record/path walker).</summary>
+    sealed record Spel(ISpellGetter Rec, float[] Magnitudes, FormKey[] BaseEffects, int[] Durations, bool[] HasData)
     {
         public FormKey Fk => Rec.FormKey;
     }
@@ -90,7 +99,17 @@ public static class ValuePredicateProbe
         };
         var armoBodies = armos.Select(a => (IMajorRecordGetter)a.Rec).ToList();
 
-        Console.WriteLine($"-- synthesized {mgefs.Count} MagicEffect + {weaps.Count} Weapon + {armos.Count} Armor records --");
+        // ---- SPEL cohort: list-wildcard fixtures (populated, empty, and an absent leaf) ----------------------
+        var spells = new List<Spel>
+        {
+            MakeSpell(mod, (10f, projX, 1, true), (100f, projY, 4, true)),
+            MakeSpell(mod, (50f, projX, 8, true)),
+            MakeSpell(mod),
+            MakeSpell(mod, (0f, projY, 0, false)),
+        };
+        var spellBodies = spells.Select(s => (IMajorRecordGetter)s.Rec).ToList();
+
+        Console.WriteLine($"-- synthesized {mgefs.Count} MagicEffect + {weaps.Count} Weapon + {armos.Count} Armor + {spells.Count} Spell records --");
         Console.WriteLine();
 
         // ============================ FILTER-CORRECTNESS (matched set == brute force) ============================
@@ -213,6 +232,104 @@ public static class ValuePredicateProbe
 
         // parse: `has` is a recognized operator.
         Check("parse: `has` accepted", FieldPredicateSet.Parse(new[] { "BodyTemplate.FirstPersonFlags has 16" }).Error is null);
+
+        // ============== LIST WILDCARD `[*]`: existential ANY over every scalar/presence operator ==============
+        Console.WriteLine();
+        Console.WriteLine("-- list wildcard [*]: existential ANY --");
+
+        CheckSet("Effects[*].Data.Magnitude > 50  (ANY numeric leaf)",
+            Run(new[] { "Effects[*].Data.Magnitude > 50" }, spellBodies),
+            Expect(spells, s => s.HasData.Zip(s.Magnitudes).Any(x => x.First && x.Second > 50)));
+        CheckSet("Effects[*].Data.Magnitude = 50  (ANY equality)",
+            Run(new[] { "Effects[*].Data.Magnitude = 50" }, spellBodies),
+            Expect(spells, s => s.HasData.Zip(s.Magnitudes).Any(x => x.First && x.Second == 50)));
+        CheckSet("Effects[*].Data.Magnitude != 50  (existential !=, not NONE-equal)",
+            Run(new[] { "Effects[*].Data.Magnitude != 50" }, spellBodies),
+            Expect(spells, s => s.HasData.Zip(s.Magnitudes).Any(x => x.First && x.Second != 50)));
+        CheckSet($"Effects[*].BaseEffect = {projX}  (ANY FormKey)",
+            Run(new[] { $"Effects[*].BaseEffect = {projX}" }, spellBodies),
+            Expect(spells, s => s.BaseEffects.Contains(projX)));
+        CheckSet("Effects[*].BaseEffect contains hcvalguard  (ANY string token)",
+            Run(new[] { "Effects[*].BaseEffect contains hcvalguard" }, spellBodies),
+            Expect(spells, s => s.BaseEffects.Any(f => f.ToString().Contains("hcvalguard", StringComparison.OrdinalIgnoreCase))));
+        CheckSet("Effects[*].Data.Duration has 4  (ANY integer bit-test)",
+            Run(new[] { "Effects[*].Data.Duration has 4" }, spellBodies),
+            Expect(spells, s => s.HasData.Zip(s.Durations).Any(x => x.First && (x.Second & 4) == 4)));
+
+        CheckSet("Effects[*].Data.Magnitude exists  (at least one present leaf)",
+            Run(new[] { "Effects[*].Data.Magnitude exists" }, spellBodies),
+            Expect(spells, s => s.HasData.Any(x => x)));
+        CheckSet("Effects[*].Data.Magnitude missing  (no present leaf; empty list included)",
+            Run(new[] { "Effects[*].Data.Magnitude missing" }, spellBodies),
+            Expect(spells, s => !s.HasData.Any(x => x)));
+        CheckSet("Effects[*].Data exists  (ANY non-empty substruct leaf)",
+            Run(new[] { "Effects[*].Data exists" }, spellBodies),
+            Expect(spells, s => s.HasData.Any(x => x)));
+
+        // A wildcard may itself be the leaf (list<FormLink>), not only a mid-path hop into a struct.
+        {
+            var kwHit = mod.Armors.AddNew(); kwHit.Keywords = new() { new FormLink<IKeywordGetter>(projX), new FormLink<IKeywordGetter>(projY) };
+            var kwMiss = mod.Armors.AddNew(); kwMiss.Keywords = new();
+            var directLeaves = new IMajorRecordGetter[] { kwHit, kwMiss };
+            CheckSet("Keywords[*] = FormKey  (wildcard is the scalar leaf)",
+                Run(new[] { $"Keywords[*] = {projY}" }, directLeaves), new HashSet<FormKey> { kwHit.FormKey });
+            CheckSet("Keywords[*] missing  (empty direct-leaf list)",
+                Run(new[] { "Keywords[*] missing" }, directLeaves), new HashSet<FormKey> { kwMiss.FormKey });
+        }
+
+        // A valid predicate that simply has no satisfying value is a CLEAN zero: values were read, so this is not
+        // confused with the wrong-path class below.
+        {
+            var (matched, set) = RunWithSet(new[] { "Effects[*].Data.Magnitude > 500" }, spellBodies);
+            Check("wildcard no-match: valid values produce 0 matches", matched.Count == 0);
+            Check("wildcard no-match: no false accounting alarm", set.AccountingNote() is null);
+        }
+
+        // Wrong list field and wrong element suffix both retain the loud no-readable-leaf accounting.
+        foreach (var wrong in new[] { "Effectz[*].Data.Magnitude > 50", "Effects[*].Data.Magnitud > 50" })
+        {
+            var (matched, set) = RunWithSet(new[] { wrong }, spellBodies);
+            Check($"wildcard wrong path '{wrong}': 0 matches", matched.Count == 0);
+            Check($"wildcard wrong path '{wrong}': LOUD accounting",
+                set.AccountingNote() is { } n && n.Contains("no readable scalar/presence leaf", StringComparison.Ordinal));
+        }
+
+        // A wildcard on a scalar is structurally illegal and aborts by name on the first candidate.
+        {
+            var (matched, set) = RunWithSet(new[] { "EditorID[*] contains hc" }, spellBodies);
+            Check("non-list wildcard: 0 matches", matched.Count == 0);
+            Check("non-list wildcard: named FatalError (requires a list field)",
+                set.FatalError is { } e && e.Contains("requires a list field", StringComparison.Ordinal));
+        }
+
+        // If every list is empty, `missing` follows the declared semantics but the suffix was never exercised;
+        // accounting must say the cohort did not validate it instead of presenting an unqualified answer.
+        {
+            var emptyOnly = new[] { spellBodies[2] };
+            var (matched, set) = RunWithSet(new[] { "Effects[*].Data.Magnitude missing" }, emptyOnly);
+            Check("all-empty wildcard: missing matches the empty-list record", matched.SetEquals(new[] { spells[2].Fk }));
+            Check("all-empty wildcard: LOUD no scalar/presence accounting",
+                set.AccountingNote() is { } n && n.Contains("suffix could not be validated", StringComparison.Ordinal));
+        }
+
+        // Malformed source data: a null list element is an unreadable leaf, never evidence for `missing`.
+        // ExtendedList accepts it in-memory, giving the guard a deterministic fault without game files.
+        {
+            var malformed = mod.Spells.AddNew();
+            malformed.Effects.Add(null!);
+            var (matched, set) = RunWithSet(new[] { "Effects[*].Data.Magnitude missing" }, new IMajorRecordGetter[] { malformed });
+            Check("wildcard unreadable leaf: NOT counted as missing", matched.Count == 0);
+            Check("wildcard unreadable leaf: accounting names read-fault/unjudgeable",
+                set.AccountingNote() is { } n && n.Contains("read-fault", StringComparison.Ordinal));
+        }
+
+        // Syntax errors are pre-scan refusals, not unreadable data: mixed index/wildcard, stray '*', and >1 wildcard.
+        Check("parse: mixed wildcard/index brackets refused",
+            FieldPredicateSet.Parse(new[] { "Effects[*][0].Data.Magnitude > 1" }).Error is { } mix && mix.Contains("invalid path segment", StringComparison.Ordinal));
+        Check("parse: '*' mixed into a concrete index refused",
+            FieldPredicateSet.Parse(new[] { "Effects[0*].Data.Magnitude > 1" }).Error is { } stray && stray.Contains("exact list hop", StringComparison.Ordinal));
+        Check("parse: more than one wildcard refused by name",
+            FieldPredicateSet.Parse(new[] { "Effects[*].Conditions[*].Data > 1" }).Error is { } multi && multi.Contains("at most one", StringComparison.Ordinal));
 
         // ============== PRESENCE tests: exists / missing (no operand) — "which records CARRY this field" (#197) ==============
         Console.WriteLine();
@@ -386,6 +503,20 @@ public static class ValuePredicateProbe
         return new Armo(a, (ulong)flags);
     }
 
+    static Spel MakeSpell(SkyrimMod mod, params (float Magnitude, FormKey BaseEffect, int Duration, bool HasData)[] effects)
+    {
+        var s = mod.Spells.AddNew();
+        foreach (var x in effects)
+        {
+            var e = new Effect();
+            e.BaseEffect.SetTo(x.BaseEffect);
+            if (x.HasData) e.Data = new EffectData { Magnitude = x.Magnitude, Duration = x.Duration };
+            s.Effects.Add(e);
+        }
+        return new Spel(s, effects.Select(x => x.Magnitude).ToArray(), effects.Select(x => x.BaseEffect).ToArray(),
+            effects.Select(x => x.Duration).ToArray(), effects.Select(x => x.HasData).ToArray());
+    }
+
     /// <summary>Parse + evaluate the predicate set over a cohort; return the matched FormKey set. Throws if the
     /// predicates don't parse (these call sites pass well-formed predicates — a parse failure is a real bug).</summary>
     static HashSet<FormKey> Run(string[] where, IEnumerable<IMajorRecordGetter> cohort) => RunWithSet(where, cohort).matched;
@@ -407,6 +538,9 @@ public static class ValuePredicateProbe
 
     static HashSet<FormKey> Expect(IEnumerable<Armo> cohort, Func<Armo, bool> pred)
         => cohort.Where(pred).Select(a => a.Fk).ToHashSet();
+
+    static HashSet<FormKey> Expect(IEnumerable<Spel> cohort, Func<Spel, bool> pred)
+        => cohort.Where(pred).Select(s => s.Fk).ToHashSet();
 
     static void CheckSet(string label, HashSet<FormKey> actual, HashSet<FormKey> expected)
     {

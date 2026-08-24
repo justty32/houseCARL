@@ -4,6 +4,16 @@ All notable changes to houseCARL are documented here. Versioning is [semantic](h
 the `version` in `.claude-plugin/plugin.json` is bumped on each release, so installed users update only
 when it changes.
 
+## Unreleased
+
+- **`cross_plugin_query where=` can now filter through a list with `[*]`.** A predicate such as
+  `Effects[*].Data.Magnitude > 50` expands the list and matches the record when **any** element satisfies
+  it. The same existential rule applies to `=`, `!=`, ranges, `contains`, and `has`; `exists` means at
+  least one expanded leaf is present/non-empty, while `missing` means none is present. One wildcard is
+  supported per predicate. A wildcard on a non-list, malformed/multiple wildcard syntax, an unreadable
+  leaf, or a cohort that never yields a scalar/presence leaf is named explicitly rather than becoming a
+  silent zero-match (or an invented `missing`).
+
 ## 1.8.1 — 2026-07-16
 
 A small read/query-surface patch: two refinements that let a whole-plugin audit and a record read land the

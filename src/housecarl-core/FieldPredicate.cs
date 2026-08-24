@@ -28,12 +28,13 @@ namespace HousecarlCore;
 /// field is a fast, named <see cref="FatalError"/> on the first value-bearing candidate — never a whole-scan
 /// silent skip.</para>
 ///
-/// <para>Scope: the value operators take scalar-leaf paths only (incl. a concrete bracketed element like
-/// <c>Keywords[0]</c>). A whole LIST leaf (<c>Keywords</c>, <c>Effects</c>) reads as a no-value container summary,
-/// so a value predicate on a list path is surfaced by the Q3 accounting, never silently matched — list→FormID
-/// membership is <c>references=</c>'s job. The PRESENCE operators (<c>exists</c>/<c>missing</c>) are the exception:
-/// they DO match a carried substruct/list leaf (present and non-empty), the "which records carry a VMAD/Effects"
-/// query (#197). A wildcard over a list (<c>Effects[*].Magnitude &gt; 50</c>) is a deliberate future extension.</para>
+/// <para>Scope: the value operators take scalar-leaf paths (including a concrete bracketed element like
+/// <c>Keywords[0]</c>) and may contain one list wildcard, e.g. <c>Effects[*].Data.Magnitude &gt; 50</c>.
+/// A wildcard expands every element and uses existential ANY semantics for every value operator: the record
+/// matches when any expanded scalar satisfies the comparison. The PRESENCE operators apply the same existential
+/// rule: <c>exists</c> means at least one expanded leaf is present/non-empty; <c>missing</c> means none is present,
+/// while an unreadable/no-such-field leaf is unjudgeable and is never treated as missing. A whole un-wildcarded
+/// LIST leaf still reads as a container summary (except under presence tests).</para>
 /// </summary>
 public sealed class FieldPredicateSet
 {
@@ -53,7 +54,7 @@ public sealed class FieldPredicateSet
     /// <summary>One parsed predicate: the split path segments (fed straight to <see cref="ReadEngine.ReadLeaf"/>),
     /// the operator, the raw operand, and — for a numeric operator — the operand pre-parsed to a double (validated
     /// at parse, so a non-numeric operand under <c>&gt;</c>/<c>&lt;</c> fails the whole call before any scan).</summary>
-    sealed record Predicate(string Text, string[] PathSegments, string PathDisplay, Op Op, string Operand, double NumericOperand);
+    sealed record Predicate(string Text, string[] PathSegments, string PathDisplay, int WildcardIndex, Op Op, string Operand, double NumericOperand);
 
     readonly IReadOnlyList<Predicate> _predicates;
     readonly long[] _valueRead;   // per-predicate: candidates whose path read SOME value
@@ -61,6 +62,8 @@ public sealed class FieldPredicateSet
     readonly long[] _noField;     // per-predicate SUBSET of _noValue: the path is not a field on the record (mistyped / wrong for this type)
     readonly long[] _container;   // per-predicate SUBSET of _noValue: the path resolves to a container/list, not a scalar leaf
     readonly long[] _unreadable;  // per-predicate SUBSET of _noValue: the path READ FAULTED (Mutagen-unparseable content) — a fault, NOT an unset value
+    readonly long[] _emptyWildcard; // per-predicate SUBSET of _noValue: a valid wildcard list expanded zero elements
+    readonly long[] _wildcardFault; // wildcard records with an unreadable leaf that prevented a definite negative/missing verdict
     long _scanned;
     string? _fatal;
 
@@ -72,6 +75,8 @@ public sealed class FieldPredicateSet
         _noField = new long[predicates.Count];
         _container = new long[predicates.Count];
         _unreadable = new long[predicates.Count];
+        _emptyWildcard = new long[predicates.Count];
+        _wildcardFault = new long[predicates.Count];
     }
 
     /// <summary>Set once when a numeric operator meets a non-numeric field value on the first value-bearing
@@ -153,9 +158,28 @@ public sealed class FieldPredicateSet
         //    consumed the operator positionally, so that's fine.)
         var operand = text.Substring(after).Trim();
 
-        var segs = path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (segs.Length == 0)
+        var segs = path.Split('.', StringSplitOptions.TrimEntries);
+        if (segs.Length == 0 || segs.Any(s => s.Length == 0))
             return (null, $"predicate '{raw}': '{path}' is not a usable field path.");
+
+        // Validate bracket grammar before scanning. ReadLeaf deliberately fault-isolates malformed paths into an
+        // unreadable note; predicates instead must refuse malformed wildcard/index syntax at PARSE time so it
+        // cannot resemble a data-dependent miss. Initial wildcard scope is exactly one [*] per predicate.
+        int wildcardIndex = -1;
+        for (int s = 0; s < segs.Length; s++)
+        {
+            string? key;
+            try { (_, key) = WriteEngine.ParseSegment(segs[s]); }
+            catch (Exception ex) { return (null, $"predicate '{raw}': invalid path segment '{segs[s]}': {ex.Message}"); }
+            if (key == "*")
+            {
+                if (wildcardIndex >= 0)
+                    return (null, $"predicate '{raw}': at most one list wildcard [*] is supported per predicate; use separate where= predicates instead.");
+                wildcardIndex = s;
+            }
+            else if (segs[s].Contains('*', StringComparison.Ordinal))
+                return (null, $"predicate '{raw}': wildcard syntax must be the exact list hop '[*]'; do not mix '*' with a concrete index/key.");
+        }
 
         // A presence op (exists/missing) takes NO operand — a trailing value is a mistake, refused loud (Q3, never
         // silently ignored). Every other op REQUIRES an operand.
@@ -163,7 +187,7 @@ public sealed class FieldPredicateSet
         {
             if (operand.Length != 0)
                 return (null, $"predicate '{raw}': '{OpStr(op)}' is a presence test and takes no value (got '{operand}'). Write it as \"{path} {OpStr(op)}\".");
-            return (new Predicate(text, segs, path, op, "", 0), null);
+            return (new Predicate(text, segs, path, wildcardIndex, op, "", 0), null);
         }
 
         if (operand.Length == 0)
@@ -174,7 +198,7 @@ public sealed class FieldPredicateSet
         if (IsNumericOp(op) && !TryNum(operand, out num))
             return (null, $"predicate '{raw}': operator '{OpStr(op)}' needs a numeric value, got '{operand}'.");
 
-        return (new Predicate(text, segs, path, op, operand, num), null);
+        return (new Predicate(text, segs, path, wildcardIndex, op, operand, num), null);
     }
 
     static bool IsOpChar(char c) => c is '=' or '!' or '<' or '>';
@@ -200,6 +224,12 @@ public sealed class FieldPredicateSet
         for (int k = 0; k < _predicates.Count; k++)
         {
             var p = _predicates[k];
+            if (p.WildcardIndex >= 0)
+            {
+                if (!MatchesWildcard(body, p, k)) all = false;
+                if (_fatal is not null) return false;
+                continue;
+            }
             var leaf = ReadEngine.ReadLeaf(body, p.PathSegments);   // internal, same assembly — the by-construction read walk
 
             // Presence ops (exists/missing) are the ONE case where a no-value CONTAINER leaf is a MATCH, not a miss:
@@ -246,6 +276,94 @@ public sealed class FieldPredicateSet
             if (!satisfied) all = false;
         }
         return all;
+    }
+
+    /// <summary>Evaluate one list wildcard over one record. Every comparison, including <c>!=</c> and
+    /// <c>has</c>, is existential: any scalar leaf satisfying it is enough. Presence is likewise existential;
+    /// <c>missing</c> is true only when no leaf is present and every generated verdict is judgeable. A read fault
+    /// or no-such-field leaf can therefore never manufacture a missing match.</summary>
+    bool MatchesWildcard(IMajorRecordGetter body, Predicate p, int k)
+    {
+        var expansion = ReadEngine.ReadListWildcard(body, p.PathSegments, p.WildcardIndex);
+        if (expansion.Error is not null)
+        {
+            _fatal ??= $"predicate '{p.Text}': {expansion.Error}";
+            return false;
+        }
+
+        var leaves = expansion.Leaves;
+        if (leaves.Count == 0)
+        {
+            // `missing` follows the requested mathematical semantics (there is no present leaf), but accounting
+            // stays loud if an entire cohort never produces even one leaf with which to validate the suffix.
+            _emptyWildcard[k]++;
+            _noValue[k]++;
+            return p.Op == Op.Missing;
+        }
+
+        if (p.Op is Op.Exists or Op.Missing)
+        {
+            bool present = false, absent = false, noField = false, unreadable = false;
+            foreach (var leaf in leaves)
+            {
+                switch (ClassifyPresence(leaf))
+                {
+                    case Presence.Present: present = true; break;
+                    case Presence.Absent: absent = true; break;
+                    case Presence.NoField: noField = true; break;
+                    default: unreadable = true; break;
+                }
+            }
+            if (present)
+            {
+                _valueRead[k]++;
+                return p.Op == Op.Exists;
+            }
+            if (unreadable || noField)
+            {
+                _noValue[k]++;
+                if (unreadable) { _unreadable[k]++; _wildcardFault[k]++; }
+                else _noField[k]++;
+                return false; // neither exists nor missing: the record is unjudgeable, never silently "missing"
+            }
+            if (absent)
+            {
+                _valueRead[k]++; // a definite absent verdict is a successfully-read presence result
+                return p.Op == Op.Missing;
+            }
+            _noValue[k]++;
+            return p.Op == Op.Missing;
+        }
+
+        bool any = false, scalar = false, noFieldLeaf = false, containerLeaf = false, unreadableLeaf = false;
+        foreach (var leaf in leaves)
+        {
+            if (!leaf.HasValue)
+            {
+                var note = leaf.Note ?? "";
+                if (note.StartsWith("(no field", StringComparison.Ordinal)) noFieldLeaf = true;
+                else if (note.StartsWith("(unreadable", StringComparison.Ordinal)) unreadableLeaf = true;
+                else if (note.Length > 0 && note[0] == '[') containerLeaf = true;
+                continue;
+            }
+            scalar = true;
+            var (satisfied, err) = Compare(p, leaf);
+            if (err is not null) { _fatal ??= err; return false; }
+            if (satisfied) any = true;
+        }
+        if (scalar) _valueRead[k]++;
+        else
+        {
+            _noValue[k]++;
+            // One candidate occupies one accounting bucket; fault wins because it is the strongest Q3 condition.
+            if (unreadableLeaf) _unreadable[k]++;
+            else if (containerLeaf) _container[k]++;
+            else if (noFieldLeaf) _noField[k]++;
+        }
+        // A satisfying scalar proves the existential even if another element faulted. Without a hit, the fault
+        // makes the negative unjudgeable and must be surfaced by AccountingNote.
+        if (unreadableLeaf && !any) _wildcardFault[k]++;
+        return any;
     }
 
     /// <summary>The three-state presence verdict for a leaf under <c>exists</c>/<c>missing</c>: a DEFINITE
@@ -390,9 +508,20 @@ public sealed class FieldPredicateSet
         List<string>? notes = null;
         for (int k = 0; k < _predicates.Count; k++)
         {
-            var path = _predicates[k].PathDisplay;
+            var predicate = _predicates[k];
+            var path = predicate.PathDisplay;
             if (_valueRead[k] == 0)
             {
+                if (predicate.WildcardIndex >= 0)
+                {
+                    string details = _emptyWildcard[k] == _scanned
+                        ? "every wildcard list was null/empty, so the suffix could not be validated against an element"
+                        : $"no scalar/presence leaf was readable after expansion (no-field {_noField[k]:N0}, container/list {_container[k]:N0}, read-fault {_unreadable[k]:N0}, empty expansion {_emptyWildcard[k]:N0})";
+                    (notes ??= new()).Add(
+                        $"wildcard predicate field '{path}' yielded no readable scalar/presence leaf on any of {_scanned:N0} scanned record(s) — {details}. " +
+                        "The result is NOT a confirmed answer; verify the element suffix against the record schema or widen to records with populated lists.");
+                    continue;
+                }
                 // No candidate read a value — but the CAUSE decides whether this is a wrong path or a correct path
                 // over a value-less scope, and those need opposite next moves (fix the path vs. widen the scope). All
                 // four keep the loud marker "yielded no readable value on any" (distinct from the SOFT "had no readable
@@ -424,6 +553,10 @@ public sealed class FieldPredicateSet
                 (notes ??= new()).Add(
                     $"note: '{path}' had no readable value on {_noValue[k]:N0} of {_scanned:N0} scanned record(s) " +
                     $"(absent or not a field on those types) — counted as non-matches there, not errors.");
+            if (_wildcardFault[k] > 0)
+                (notes ??= new()).Add(
+                    $"note: wildcard predicate field '{path}' had unreadable leaf data on {_wildcardFault[k]:N0} scanned record(s); " +
+                    "those records were unjudgeable when no other element satisfied the predicate, and were never counted as 'missing'.");
         }
         return notes is null ? null : string.Join("\n", notes);
     }

@@ -253,6 +253,78 @@ public static class ReadEngine
         catch (Exception ex) { return LeafRead.None($"(unreadable: {ex.Message})"); }
     }
 
+    /// <summary>The result of expanding one <c>[*]</c> predicate hop. <see cref="Leaves"/> contains one
+    /// ordinary <see cref="LeafRead"/> per list element (or one diagnostic leaf when navigation to the list
+    /// could not be judged). <see cref="Error"/> is reserved for a structurally invalid wildcard target — most
+    /// importantly a field that is not a list — so the predicate can refuse the whole scan by name instead of
+    /// degrading it to a miss.</summary>
+    internal readonly record struct ListWildcardRead(IReadOnlyList<LeafRead> Leaves, string? Error);
+
+    /// <summary>Expand the single <c>[*]</c> in a predicate path and read the suffix from every list element.
+    /// Navigation before and after the wildcard deliberately reuses the same reflection primitives as
+    /// <see cref="ReadLeaf"/>. This is list-only: dictionaries and fixed gendered pairs still require an explicit
+    /// key/index, and are refused loud if addressed with <c>[*]</c>. A null/empty list expands to zero leaves;
+    /// that is a real empty expansion whose end-to-end accounting is owned by <c>FieldPredicateSet</c>.</summary>
+    internal static ListWildcardRead ReadListWildcard(object record, string[] path, int wildcardIndex)
+    {
+        try
+        {
+            object current = record;
+            for (int i = 0; i < wildcardIndex; i++)
+            {
+                var (segName, segKey) = WriteEngine.ParseSegment(path[i]);
+                var p = WriteEngine.ResolveProperty(current.GetType(), segName);
+                if (p is null)
+                    return new(new[] { LeafRead.None(NoFieldNote(current, segName, i > 0 ? WriteEngine.ParseSegment(path[i - 1]).name : null)) }, null);
+                var next = segKey is null ? p.GetValue(current) : WriteEngine.StepIntoElement(current, p, segName, segKey);
+                if (next is null) return new(new[] { LeafRead.None(AbsentNote) }, null);
+                current = next;
+            }
+
+            var (listName, key) = WriteEngine.ParseSegment(path[wildcardIndex]);
+            if (key != "*")
+                return new(Array.Empty<LeafRead>(), $"wildcard path invariant failed at '{path[wildcardIndex]}' — expected an exact [*] list hop.");
+            var listProp = WriteEngine.ResolveProperty(current.GetType(), listName);
+            if (listProp is null)
+                return new(new[] { LeafRead.None(NoFieldNote(current, listName, wildcardIndex > 0 ? WriteEngine.ParseSegment(path[wildcardIndex - 1]).name : null)) }, null);
+
+            // Decide list-ness from the DECLARED model type, so an absent nullable value cannot hide an illegal
+            // wildcard and a dictionary/gendered pair cannot accidentally pass merely because it is enumerable.
+            var listIface = WriteEngine.ClosedInterface(listProp.PropertyType, typeof(IList<>))
+                         ?? WriteEngine.ClosedInterface(listProp.PropertyType, typeof(IReadOnlyList<>));
+            if (listIface is null)
+                return new(Array.Empty<LeafRead>(),
+                    $"wildcard segment '{listName}[*]' requires a list field, but '{listName}' is {listProp.PropertyType.Name}; " +
+                    "use a concrete [index]/[key] for non-list containers.");
+
+            var collection = listProp.GetValue(current);
+            if (collection is null) return new(Array.Empty<LeafRead>(), null);
+            if (collection is not System.Collections.IEnumerable items)
+                return new(Array.Empty<LeafRead>(),
+                    $"wildcard segment '{listName}[*]' resolved to {collection.GetType().Name}, which is not an enumerable list at runtime.");
+
+            var elemType = listIface.GetGenericArguments()[0];
+            var suffix = path[(wildcardIndex + 1)..];
+            var leaves = new List<LeafRead>();
+            foreach (var item in items)
+            {
+                if (item is null)
+                {
+                    leaves.Add(LeafRead.None($"(unreadable: list '{listName}' contains a null element)"));
+                    continue;
+                }
+                leaves.Add(suffix.Length == 0
+                    ? EmitToken(item, elemType, current)
+                    : ReadLeaf(item, suffix));
+            }
+            return new(leaves, null);
+        }
+        catch (Exception ex)
+        {
+            return new(new[] { LeafRead.None($"(unreadable: wildcard expansion failed: {ex.Message})") }, null);
+        }
+    }
+
     /// <summary>The FormKeys on a record's <c>Keywords</c> list — the ONE keyword walk (previously
     /// triplicated across the SkyPatcher overlay, the post-state service resolver, and the show CLI,
     /// with diverging property resolution and non-formlink handling). Resolves the property the same
