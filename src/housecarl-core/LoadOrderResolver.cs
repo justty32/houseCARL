@@ -1,6 +1,8 @@
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Binary.Parameters;
+using Mutagen.Bethesda.Plugins.Binary.Streams;
+using Mutagen.Bethesda.Plugins.Utility;
 using Mutagen.Bethesda.Plugins.Cache;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
@@ -264,19 +266,33 @@ public sealed class LoadOrderResolver : IDisposable
     /// index, so that tool reuses this one strings-correct choke point instead of re-deriving it.</para></summary>
     public static ISkyrimModGetter OpenOverlay(string path, string? dataDir)
     {
-        if (dataDir is not null && !FolderHasOwnStrings(path))
+        // Keep Mutagen's supported Windows archive/load-order discovery unchanged.
+        if (OperatingSystem.IsWindows())
         {
-            var prm = BinaryReadParameters.Default with
-            {
-                StringsParam = new StringsReadParameters
-                {
-                    BsaFolderOverride = dataDir,
-                    StringsFolderOverride = Path.Combine(dataDir, "Strings"),
-                },
-            };
-            return SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE, prm);
+            var options = dataDir is not null && !FolderHasOwnStrings(path)
+                ? BinaryReadParameters.Default with { StringsParam = new StringsReadParameters {
+                    BsaFolderOverride = dataDir, StringsFolderOverride = Path.Combine(dataDir, "Strings") } }
+                : BinaryReadParameters.Default;
+            return SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE, options);
         }
-        return SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+        var modPath = ModPath.FromPath(path);
+        var parameters = BinaryReadParameters.Default;
+        var meta = ParsingMeta.Factory(parameters, GameRelease.SkyrimSE, modPath);
+        meta.RecordInfoCache = new RecordTypeInfoCacheReader(
+            () => new MutagenBinaryReadStream(modPath.Path, meta), modPath.ModKey, meta.LinkCache);
+        var stream = new MutagenBinaryReadStream(modPath.Path, meta);
+        try
+        {
+            if (stream.Remaining < 12) throw new InvalidDataException("Plugin header is too short to read flags.");
+            if ((stream.GetInt32(8) & 0x80) != 0)
+            {
+                var folder = dataDir is not null && !FolderHasOwnStrings(path)
+                    ? dataDir : Path.GetDirectoryName(Path.GetFullPath(path))!;
+                meta.StringsLookup = new ExplicitStringsLookup(folder, modPath.ModKey);
+            }
+            return ExplicitStringsLookup.OpenOverlay(stream, modPath.ModKey);
+        }
+        catch { stream.Dispose(); throw; }
     }
 
     /// <summary>True if the plugin's OWN folder carries a strings source Mutagen's folder-adjacent default would find —
@@ -289,8 +305,8 @@ public sealed class LoadOrderResolver : IDisposable
         {
             var folder = Path.GetDirectoryName(path);
             if (folder is null) return true;
-            if (Directory.Exists(Path.Combine(folder, "Strings"))) return true;
-            return Directory.EnumerateFiles(folder, "*.bsa").Any();
+            if (Directory.EnumerateDirectories(folder).Any(p => Path.GetFileName(p).Equals("Strings", StringComparison.OrdinalIgnoreCase))) return true;
+            return Directory.EnumerateFiles(folder).Any(p => Path.GetExtension(p).Equals(".bsa", StringComparison.OrdinalIgnoreCase));
         }
         catch { return true; }
     }

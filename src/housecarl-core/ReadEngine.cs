@@ -16,7 +16,8 @@ namespace HousecarlCore;
 /// value — NOT part of the round-trip token (the write surface reads <see cref="Token"/>, the round-trip oracle
 /// drives the internal <c>LeafRead</c>, and <c>FieldsDiff</c> compares Token/Note), so it is invisible to write,
 /// read-proof, and diff. Used to decode a value that is correct but opaque — a biped-slot bitmask into its slot
-/// numbers (HCBR-2026-07-12) — without disturbing the token that must round-trip. Null on every leaf that needs
+/// numbers (HCBR-2026-07-12), or a TranslatedString's optional UTF-8 interpretation (see RecordNameDisplay)
+/// — without disturbing the token that must round-trip. Null on every leaf that needs
 /// no annotation.</para>
 ///
 /// <para><see cref="Link"/> is the resolve_names annotation (Wave 2 / P7): when a leaf's <see cref="Token"/> is a
@@ -77,7 +78,10 @@ public static class ReadEngine
     /// numerically WITHOUT tripping over the name/number rendering split that <c>[Flags].ToString()</c> produces
     /// (named bits → "Body"; an unnamed modder slot → "8388608"). The <see cref="Token"/> is unchanged — the
     /// round-trip oracle still drives the same display token — so this is invisible to read/write/diff.</para></summary>
-    internal readonly record struct LeafRead(bool HasValue, string Token, string? Note, FlagBits? Flags = null, int? ContainerCount = null)
+    // DisplayText is populated only for TranslatedString, never arbitrary string/EditorID/path fields.
+    // It is the optional UTF-8 interpretation used for display and text predicates, not write replay.
+    internal readonly record struct LeafRead(bool HasValue, string Token, string? Note, FlagBits? Flags = null, int? ContainerCount = null,
+        string? DisplayText = null)
     {
         public static LeafRead Value(string token) => new(true, token, null);
         public static LeafRead FlagsValue(string token, FlagBits bits) => new(true, token, null, bits);
@@ -203,7 +207,7 @@ public static class ReadEngine
                 // FieldsDiff runs never sees the hint (it reads at expansion depth, a different summary path).
                 // The hint text is the caller's (containerHint): depth=2 is only a real knob on some surfaces.
                 if (note is { Length: > 0 } && note[0] == '[' && !string.IsNullOrEmpty(containerHint)) note += containerHint;
-                fields.Add(new FieldValue(p, r.HasValue, r.HasValue ? r.Token : null, note, FlagSlotDisplay(r)));
+                fields.Add(new FieldValue(p, r.HasValue, r.HasValue ? r.Token : null, note, LeafDisplay(r)));
             }
         }
         else
@@ -410,7 +414,7 @@ public static class ReadEngine
     {
         if (budget < 0) return;
         var leaf = EmitToken(val, declaredType, parent);
-        if (leaf.HasValue) { Emit(sink, ref budget, new FieldValue(path, true, leaf.Token, null, FlagSlotDisplay(leaf))); return; }
+        if (leaf.HasValue) { Emit(sink, ref budget, new FieldValue(path, true, leaf.Token, null, LeafDisplay(leaf))); return; }
         if (val is null) { Emit(sink, ref budget, new FieldValue(path, false, null, leaf.Note)); return; }
         // a link (incl. a null FormKey, or an FLOI) is a note, not an openable container/substruct.
         if (val is IFormLinkGetter || WriteEngine.IsFormLinkOrIndex(Nullable.GetUnderlyingType(declaredType) ?? declaredType))
@@ -732,7 +736,8 @@ public static class ReadEngine
         if (val.GetType().FullName == "Mutagen.Bethesda.Strings.TranslatedString")
         {
             var s = ReflectString(val, "String");
-            return s is null ? LeafRead.None(UnresolvedStringNote) : LeafRead.Value(s);
+            return s is null ? LeafRead.None(UnresolvedStringNote)
+                : new LeafRead(true, s, null, DisplayText: RecordNameDisplay.Utf8Interpretation(s));
         }
         // value types (inverse of TryValueType)
         if (TryEmitValueType(val, out var vt)) return LeafRead.Value(vt);
@@ -803,6 +808,9 @@ public static class ReadEngine
         if (slots.Count == 0) return null;
         return (slots.Count == 1 ? "slot " : "slots ") + string.Join(", ", slots);
     }
+
+    // TranslatedString metadata is distinct from the raw token; ordinary string fields never get it.
+    static string? LeafDisplay(LeafRead leaf) => leaf.DisplayText ?? FlagSlotDisplay(leaf);
 
     // -- primitive family (mirror TryPrimitive) --------------------------------
     static bool TryEmitPrimitive(object val, out string token)

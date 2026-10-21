@@ -160,6 +160,8 @@ public static class CiAll
         // set_path success arm is corpus-gated (nifly's read-only TextureSetRef blocks synthesizing a texture set).
         ("nif-set-guard", NifSetGuardProbe.RunGuard),
         ("strings-decision-guard", StringsDecisionProbe.RunGuard),
+        ("record-names-guard", RecordNamesProbe.RunGuard),
+        ("record-name-display-guard", RecordNameDisplayProbe.RunGuard),
         ("assetlink-write-guard", AssetLinkWriteProbe.RunGuard),
         // The two coercion COMPLETENESS proofs, now CI guards (were manual-only — the coerce-audit blind spot that
         // shipped the asset-link gap showed a manual proof silently goes stale). Both are self-contained: selftest is

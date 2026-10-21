@@ -15,7 +15,9 @@ namespace HousecarlCore;
 /// <para><b>By construction (cornerstone §3).</b> The extraction is NOT a per-field table — it is the read
 /// engine's own proven path-walk: each predicate pulls its candidate's value through the internal
 /// <see cref="ReadEngine.ReadLeaf"/> (the same <c>ParseSegment</c>/<c>ResolveProperty</c>/<c>StepIntoElement</c>
-/// navigation the read tools and the round-trip oracle drive), then compares the round-trippable token. So the
+/// navigation the read tools and the round-trip oracle drive), then compares the round-trippable token.
+/// TranslatedString text comparisons prefer its optional UTF-8 display interpretation (see RecordNameDisplay),
+/// while the original token remains unchanged for write replay. Ordinary string fields are never reinterpreted. So the
 /// set of fields you can FILTER on IS the set of fields houseCARL can READ — every type, every depth, no
 /// hand-kept list. The comparison vocabulary is fixed by the token forms <see cref="ReadEngine"/> emits (the
 /// faithful inverse of the write engine's Coerce): enum NAME, invariant numeric round-trip, <c>True</c>/<c>False</c>,
@@ -410,7 +412,7 @@ public sealed class FieldPredicateSet
                 return (num, null);
 
             case Op.Contains:
-                return (token.Contains(p.Operand, StringComparison.OrdinalIgnoreCase), null);
+                return ((leaf.DisplayText ?? token).Contains(p.Operand, StringComparison.OrdinalIgnoreCase), null);
 
             default: // Eq / Ne
                 // On a [Flags] enum, equate by RESOLVED bit pattern so a numeric operand matches a name-rendered
@@ -420,7 +422,7 @@ public sealed class FieldPredicateSet
                 if (flags is { } feq && TryResolveBits(p.Operand, feq.EnumType, out var opBits))
                     eq = feq.Bits == opBits;
                 else
-                    eq = ValueEquals(token, p.Operand);
+                    eq = ValueEquals(leaf.DisplayText ?? token, p.Operand);
                 return (p.Op == Op.Eq ? eq : !eq, null);
         }
     }

@@ -134,6 +134,10 @@ skills, builds the setup utility, and packs `release/houseCARL-1.8.0.zip`. Insta
 `houseCARL-Setup.exe`, `claude --plugin-dir ./dist/housecarl`, or the bundled local-marketplace
 descriptor — see the script header for details.
 
+For the Linux record-name read path, encoding contract, and offline regression commands, see
+[record-name diagnostics](RECORD_NAMES.md). This does not change the Windows release requirements
+above. Source entry points are listed in [CODE_MAP.md](CODE_MAP.md).
+
 ## Usage
 
 Talk to it.

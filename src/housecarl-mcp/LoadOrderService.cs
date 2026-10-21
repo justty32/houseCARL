@@ -1656,9 +1656,14 @@ public sealed class LoadOrderService : IDisposable
     /// <summary>The best-effort display Name of a record body — reflection-generic via Mutagen's <c>INamedGetter</c>
     /// aspect, so it inherits coverage from the model (no per-record-type wiring): every named record answers, a
     /// type with no Name (KYWD, most references) returns null. A translated Name resolves to its default-language
-    /// string. Used by housecarl_resolve (P3) and the resolve_names annotation (P7).</summary>
-    static string? ReadDisplayName(IMajorRecordGetter body) =>
-        body is INamedGetter named && !string.IsNullOrEmpty(named.Name) ? named.Name : null;
+    /// string. A strict UTF-8 interpretation of Windows-1252 text is preferred for display, subject to
+    /// the encoding ambiguity documented by RecordNameDisplay; raw read/write tokens are untouched.
+    /// Used by housecarl_resolve (P3) and the resolve_names annotation (P7).</summary>
+    static string? ReadDisplayName(IMajorRecordGetter body)
+    {
+        if (body is not INamedGetter named || string.IsNullOrEmpty(named.Name)) return null;
+        return RecordNameDisplay.Utf8Interpretation(named.Name) ?? named.Name;
+    }
 
     /// <summary>Resolve ONE FormKey to its load-order identity (type/editorid/name/winner) off a captured view + open
     /// session, memoised so a target that recurs across a batch (the SAME keyword on 500 items) resolves once. A
