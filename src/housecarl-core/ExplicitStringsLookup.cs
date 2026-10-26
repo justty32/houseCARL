@@ -35,18 +35,61 @@ internal sealed class ExplicitStringsLookup : IStringsFolderLookup
 
     readonly string _folder;
     readonly ModKey _modKey;
+    readonly Func<string, PlacementSource?>? _vfs;
     readonly Lazy<Dictionary<(StringsSource, Language), Entry>> _tables;
     sealed record Entry(string Source, bool Loose, Lazy<IStringsLookup> Table);
 
-    public ExplicitStringsLookup(string folder, ModKey modKey)
+    public ExplicitStringsLookup(string folder, ModKey modKey, Func<string, PlacementSource?>? vfs = null)
     {
         _folder = folder;
         _modKey = modKey;
+        _vfs = vfs;
         _tables = new(LoadTables);
+    }
+
+    static readonly (StringsSource Source, string Extension)[] SourceExtensions =
+        { (StringsSource.Normal, "strings"), (StringsSource.IL, "ilstrings"), (StringsSource.DL, "dlstrings") };
+
+    /// <summary>Strings tables as the MO2 VFS resolves them (2026-10-26): for each strings type × language, ask the
+    /// injected resolver for the WINNING copy of <c>strings/&lt;plugin&gt;_&lt;language&gt;.&lt;ext&gt;</c> — a loose
+    /// translation mod beats the vanilla BSA exactly as in game. The resolver already chose one winner per path, so
+    /// there is no ambiguity to report here. A resolver fault is not swallowed into "absent" silently: it propagates
+    /// to the read, which surfaces it as an unreadable field (Q3).</summary>
+    Dictionary<(StringsSource, Language), Entry> LoadVfsTables()
+    {
+        var tables = new Dictionary<(StringsSource, Language), Entry>();
+        foreach (var language in Enum.GetValues<Language>())
+        foreach (var (source, ext) in SourceExtensions)
+        {
+            var fileName = $"{_modKey.Name}_{language.ToString().ToLowerInvariant()}.{ext}";
+            // Only names Mutagen's own parser maps back to this (source, language) — never a guessed spelling.
+            if (!StringsUtility.TryRetrieveInfoFromString(StringsLanguageFormat.FullName, fileName.AsSpan(),
+                    out var parsedSource, out var parsedLanguage, out _)
+                || parsedSource != source || parsedLanguage != language) continue;
+            var rel = "strings/" + fileName;
+            var hit = _vfs!(rel);
+            if (hit is null) continue;
+            var encoding = MutagenEncoding.GetEncoding(GameRelease.SkyrimSE, language);
+            if (hit.Kind == AssetKind.Loose && hit.LooseFilePath is { } file)
+                tables[(source, language)] = new(file, true, new(() => new StringsLookupOverlay(file, source, encoding)));
+            else if (hit.ArchivePath is { } archive)
+                tables[(source, language)] = new(archive + ":" + hit.EntryPath, false, new(() =>
+                {
+                    var bytes = AssetResolver.TryReadArchiveEntry(archive, hit.EntryPath)
+                        ?? throw new InvalidDataException($"strings entry '{hit.EntryPath}' vanished from '{archive}'.");
+                    return new StringsLookupOverlay(bytes, source, encoding);
+                }));
+        }
+        return tables;
     }
 
     Dictionary<(StringsSource, Language), Entry> LoadTables()
     {
+        if (_vfs is not null)
+        {
+            var vfsTables = LoadVfsTables();
+            if (vfsTables.Count > 0) return vfsTables;          // nothing in the VFS → the folder scan below, unchanged
+        }
         var tables = new Dictionary<(StringsSource, Language), Entry>();
         if (!Directory.Exists(_folder)) return tables;
         bool Match(string name, out StringsSource source, out Language language) =>

@@ -161,6 +161,7 @@ public static class CiAll
         ("nif-set-guard", NifSetGuardProbe.RunGuard),
         ("strings-decision-guard", StringsDecisionProbe.RunGuard),
         ("record-names-guard", RecordNamesProbe.RunGuard),
+        ("strings-vfs-guard", StringsVfsProbe.RunGuard),
         ("record-name-display-guard", RecordNameDisplayProbe.RunGuard),
         ("assetlink-write-guard", AssetLinkWriteProbe.RunGuard),
         // The two coercion COMPLETENESS proofs, now CI guards (were manual-only — the coerce-audit blind spot that

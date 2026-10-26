@@ -24,6 +24,20 @@ The factory owns the stream and normal overlay disposal closes it. Upgrading Mut
 revalidating this seam and the guards. Windows behavior is retained by code path; the Linux
 guards do not constitute a Windows runtime test.
 
+## MO2 VFS strings source (2026-10-26)
+
+A localized plugin's strings are what the game reads through the MO2 VFS, not necessarily the tables
+beside the plugin. Translation mods commonly ship loose `strings/<plugin>_english.strings` (Chinese
+text in the English slot, `sLanguage=ENGLISH`), sometimes in a different mod folder from the plugin.
+For in-order reads the service injects `LoadOrderResolver.StringsVfs`: for each strings type and
+language, the asset resolver's winner for `strings/<plugin>_<language>.<ext>` (loose overwrite > mod
+priority > Data, then BSA by plugin rank) supplies the table. Only when the VFS has no table for the
+plugin does the folder scan above apply. Off-order opens (`read_plugin_file`, off-order CopyFrom and
+donor lanes) keep the folder scan. Windows keeps Mutagen's public factory and is unchanged.
+
+Writes that copy a localized winner into a patch now carry the VFS text (what the game displays)
+instead of the vanilla archive text.
+
 ## Tokens, display, and predicates
 
 `read_record` retains its byte-preserving `value` token for write replay. For translated text,
@@ -48,9 +62,10 @@ With the repository's .NET dependencies available, run:
 ```sh
 dotnet run --project src/housecarl-generator -- record-names-guard
 dotnet run --project src/housecarl-generator -- record-name-display-guard
+dotnet run --project src/housecarl-generator -- strings-vfs-guard
 ```
 
-Both are registered in `ci-all`. They create temporary synthetic plugins and a BSA, exercise
+All three are registered in `ci-all`. They create temporary synthetic plugins and a BSA, exercise
 localized and inline names, cleaned-master fallback, own-folder precedence, ambiguity errors,
 overlay disposal on Linux, link names, predicates, and write-token/copy preservation. The
 localized Unix cases unset LocalAppData for the probe and restore it afterward.

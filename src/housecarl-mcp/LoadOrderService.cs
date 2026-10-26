@@ -136,6 +136,7 @@ public sealed class LoadOrderService : IDisposable
                             $"ModsDir='{_modsDir}', DataDir='{_dataDir}'. {order.Warnings.Count} warning(s). Check " +
                             "HouseCarl config and that MO2 has written loadorder.txt/modlist.txt (a refresh/re-sort in MO2).");
                     _resolver = LoadOrderResolver.Build(paths);
+                    _resolver.StringsVfs = ResolveStringsWinner;   // localized strings follow the MO2 VFS (2026-10-26)
                     _resolvedPaths = paths;
                     _profileMtimes = profileMtimes;
                 }
@@ -218,6 +219,21 @@ public sealed class LoadOrderService : IDisposable
     /// (AssetResolver.RefreshIfStale only catches a BSA's bytes / a warmed subtree, not a membership change). No-op when
     /// none is built (a pure-record session never pays for the asset resolver). Caller holds <see cref="_gate"/>.</summary>
     void InvalidateAssetResolver() { _assetResolver?.Dispose(); _assetResolver = null; }
+
+    /// <summary>The VFS winner of one Data-relative strings path (<c>strings/skyrim_english.strings</c>) — the copy the
+    /// game reads under MO2 — for <see cref="LoadOrderResolver.StringsVfs"/>. Rides the same <see cref="Assets"/>
+    /// resolver as housecarl_asset_status, so a loose translation mod beats the vanilla BSA exactly as it does in game
+    /// (2026-10-26: Gold001 had read the vanilla English "Gold" from Skyrim - Interface.bsa while the game showed the
+    /// loose translation). Called lazily at localized-string read time. An asset resolver that cannot be built (no
+    /// roots) answers null → the overlay keeps the pre-existing folder lookup.</summary>
+    PlacementSource? ResolveStringsWinner(string relPath)
+    {
+        AssetResolver assets;
+        try { assets = Assets; }
+        catch (InvalidOperationException) { return null; }
+        var r = assets.ResolveForPlacement(relPath);
+        return r.Sources.Count > 0 ? r.Sources[0] : null;
+    }
 
     /// <summary>Resolve a batch of Data-relative asset paths through the MO2 VFS (housecarl_asset_status): for each,
     /// which source provides it and which copy WINS (loose beats BSA; among BSAs the higher plugin rank). ONE
@@ -1351,6 +1367,7 @@ public sealed class LoadOrderService : IDisposable
             if (_resolver is not null)
             {
                 var rebuilt = LoadOrderResolver.Build(paths);
+                rebuilt.StringsVfs = ResolveStringsWinner;
                 _resolver.Dispose();
                 _resolver = rebuilt;
             }

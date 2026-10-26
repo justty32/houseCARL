@@ -62,6 +62,7 @@ if (args.Length > 0 && args[0] == "class-parents") return ClassParentsEmitter.Ru
 // Localized-strings read fix (Heisen 2026-06-24): DLC master resolved to a strings-less mod folder reads Name EMPTY.
 if (args.Length > 0 && args[0] == "strings-resolve-probe") return StringsResolveProbe.Run(args[1..]);
 if (args.Length > 0 && args[0] == "record-names-guard") return RecordNamesProbe.RunGuard(args[1..]);
+if (args.Length > 0 && args[0] == "strings-vfs-guard") return StringsVfsProbe.RunGuard(args[1..]);
 if (args.Length > 0 && args[0] == "record-name-display-guard") return RecordNameDisplayProbe.RunGuard(args[1..]);
 if (args.Length > 0 && args[0] == "record-names-read") return RecordNamesLiveProbe.Run(args[1..]);
 

@@ -146,7 +146,7 @@ public sealed class LoadOrderResolver : IDisposable
         internal ISkyrimModGetter Overlay(int idx)
         {
             if (!_open.TryGetValue(idx, out var ov))
-                _open[idx] = ov = OpenOverlay(_r._paths[idx], _r._dataDir);
+                _open[idx] = ov = OpenOverlay(_r._paths[idx], _r._dataDir, _r.StringsVfs);
             return ov;
         }
 
@@ -264,7 +264,20 @@ public sealed class LoadOrderResolver : IDisposable
     /// <para>PUBLIC (2026-07-06): also the open path for <c>housecarl_read_plugin_file</c>'s RAW, out-of-load-order
     /// read of an inactive/arbitrary plugin — a pure <c>(path, dataDir) → overlay</c> factory that touches no resolver
     /// index, so that tool reuses this one strings-correct choke point instead of re-deriving it.</para></summary>
-    public static ISkyrimModGetter OpenOverlay(string path, string? dataDir)
+    public static ISkyrimModGetter OpenOverlay(string path, string? dataDir) => OpenOverlay(path, dataDir, null);
+
+    /// <summary>The MO2-VFS strings source for in-order opens: maps a Data-relative strings path
+    /// (<c>strings/skyrim_english.strings</c>) to its WINNING copy (loose overwrite &gt; mod priority &gt; Data, then
+    /// BSA by plugin rank) — the copy the game actually reads. Without it a localized master reads the vanilla
+    /// strings beside it in game Data even when a translation mod ships loose replacements (Gold001 read "Gold"
+    /// while the game shows the translated name). Null = folder-only lookup (the pre-2026-10-26 behaviour). Set by
+    /// the service after <see cref="Build"/>; consulted lazily at string-read time, never during the index build.</summary>
+    public Func<string, PlacementSource?>? StringsVfs { get; set; }
+
+    /// <summary><see cref="OpenOverlay(string, string?)"/> with an optional VFS strings source (see
+    /// <see cref="StringsVfs"/>). On Unix a VFS hit wins over the folder scan; Windows keeps Mutagen's public factory
+    /// unchanged and ignores <paramref name="stringsVfs"/>.</summary>
+    public static ISkyrimModGetter OpenOverlay(string path, string? dataDir, Func<string, PlacementSource?>? stringsVfs)
     {
         // Keep Mutagen's supported Windows archive/load-order discovery unchanged.
         if (OperatingSystem.IsWindows())
@@ -288,7 +301,7 @@ public sealed class LoadOrderResolver : IDisposable
             {
                 var folder = dataDir is not null && !FolderHasOwnStrings(path)
                     ? dataDir : Path.GetDirectoryName(Path.GetFullPath(path))!;
-                meta.StringsLookup = new ExplicitStringsLookup(folder, modPath.ModKey);
+                meta.StringsLookup = new ExplicitStringsLookup(folder, modPath.ModKey, stringsVfs);
             }
             return ExplicitStringsLookup.OpenOverlay(stream, modPath.ModKey);
         }
@@ -361,7 +374,7 @@ public sealed class LoadOrderResolver : IDisposable
         for (int i = 0; i < _paths.Length; i++)
         {
             ISkyrimModGetter ov;
-            try { ov = OpenOverlay(_paths[i], _dataDir); }
+            try { ov = OpenOverlay(_paths[i], _dataDir, StringsVfs); }
             catch (Exception ex)
             {
                 Exclude(i, $"could not be opened — {Concise(ex)}", failures, excluded, excludedPlugins);
@@ -563,7 +576,7 @@ public sealed class LoadOrderResolver : IDisposable
             throw new ArgumentException($"plugin not in the load order: {pluginName}.{PluginNameSuggest.DidYouMean(pluginName, _names)}");
         if (s.Excluded.Contains(idx))
             throw new ArgumentException($"plugin '{pluginName}' was excluded from this session: {s.ExcludedPlugins[pluginName]}");
-        var ov = OpenOverlay(_paths[idx], _dataDir);
+        var ov = OpenOverlay(_paths[idx], _dataDir, StringsVfs);
         try
         {
             foreach (var rec in ov.EnumerateMajorRecords())
@@ -609,7 +622,7 @@ public sealed class LoadOrderResolver : IDisposable
             throw new ArgumentException($"plugin not in the load order: {pluginName}.{PluginNameSuggest.DidYouMean(pluginName, _names)}");
         if (s.Excluded.Contains(idx))
             throw new ArgumentException($"plugin '{pluginName}' was excluded from this session: {s.ExcludedPlugins[pluginName]}");
-        var ov = OpenOverlay(_paths[idx], _dataDir);
+        var ov = OpenOverlay(_paths[idx], _dataDir, StringsVfs);
         try { return ov.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList(); }
         finally { (ov as IDisposable)?.Dispose(); }
     }
@@ -646,7 +659,7 @@ public sealed class LoadOrderResolver : IDisposable
         {
             if (s.Excluded.Contains(i)) continue;                          // excluded at build (unparseable/unopenable) — wins nothing; never re-touch (would re-throw)
             ISkyrimModGetter ov;
-            try { ov = OpenOverlay(_paths[i], _dataDir); }
+            try { ov = OpenOverlay(_paths[i], _dataDir, StringsVfs); }
             catch { continue; }                                            // an unopenable plugin wins nothing (surfaced at build)
             try
             {
@@ -674,7 +687,7 @@ public sealed class LoadOrderResolver : IDisposable
         foreach (int i in ScopeIndices(plugins, s))
         {
             ISkyrimModGetter ov;
-            try { ov = OpenOverlay(_paths[i], _dataDir); }
+            try { ov = OpenOverlay(_paths[i], _dataDir, StringsVfs); }
             catch { continue; }
             try
             {
