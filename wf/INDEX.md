@@ -12,6 +12,7 @@ houseCARL = **把 Skyrim SE load order 資料層開給 AI 的 C# MCP server（Mu
 | `standards/` | 命名、skill 撰寫、文件衛生規範 |
 | `scripts/` | `build-plugin.ps1` 官方打包 |
 | `.github/` | CI（windows-latest：build＋`ci-all`）與 issue 表單 |
+| [`RECORD_NAMES.md`](../RECORD_NAMES.md)、[`CODE_MAP.md`](../CODE_MAP.md) | 本 fork 加的 record name 讀取契約（strings lookup、編碼、離線 guard 指令）與它的原始碼入口；英文，**上游沒有** |
 | `wf/` | 本 fork 加的工作流骨架（派發見 [WORKFLOWS.md](WORKFLOWS.md)；共享區 [workflows/common/](workflows/common/README.md)）；**上游沒有** |
 | `wf/tools/` | kernel 文件工具：`wf-lint.sh`（檢查，可選）、`tabledb.py`（資料檔 CRUD／連結）、`find_big_lists.py`、`fix_moved_links.py`；資料檔契約見 [workflows/common/data-files.md](workflows/common/data-files.md) |
 | `.claude/commands/` | slash 指令適配層（可選）。Claude Code 只讀專案根的這層，非侵入式佈局也留在根；沒有 slash 機制的工具忽略本目錄，直接跑 `wf/tools/wf-lint.sh` |

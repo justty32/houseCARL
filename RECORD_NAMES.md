@@ -1,6 +1,6 @@
 # Record names: strings lookup and encoding
 
-Two independent failures affected Linux reads. Localized records store a string-table ID, not
+Two independent problems affect record names on Linux. Localized records store a string-table ID, not
 inline text. Mutagen 0.53.1's default BSA strings discovery constructs Windows plugin-listing
 paths even with explicit folder overrides; on Linux this can throw a LocalAppData exception.
 Separately, UTF-8 bytes in inline English translated fields are read through Windows-1252,
@@ -24,7 +24,7 @@ The factory owns the stream and normal overlay disposal closes it. Upgrading Mut
 revalidating this seam and the guards. Windows behavior is retained by code path; the Linux
 guards do not constitute a Windows runtime test.
 
-## MO2 VFS strings source (2026-10-26)
+## MO2 VFS strings source
 
 A localized plugin's strings are what the game reads through the MO2 VFS, not necessarily the tables
 beside the plugin. Translation mods commonly ship loose `strings/<plugin>_english.strings` (Chinese
@@ -35,8 +35,8 @@ priority > Data, then BSA by plugin rank) supplies the table. Only when the VFS 
 plugin does the folder scan above apply. Off-order opens (`read_plugin_file`, off-order CopyFrom and
 donor lanes) keep the folder scan. Windows keeps Mutagen's public factory and is unchanged.
 
-Writes that copy a localized winner into a patch now carry the VFS text (what the game displays)
-instead of the vanilla archive text.
+Writes that copy a localized winner into a patch carry the VFS text (what the game displays), not
+the vanilla archive text.
 
 ## Tokens, display, and predicates
 
