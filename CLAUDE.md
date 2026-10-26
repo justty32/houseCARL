@@ -121,3 +121,7 @@ Tool-surface skills (`esp-patching`, `mod-dissection`, `bsa-archives`, `crash-di
 - **Don't edit the foundation corpus (`dev/PRFAQ/`) or other ARCHIVE docs.** Immutable record of why decisions were made. New docs supersede; old ones stay as written (typo-fix excepted). Doc classes (LIVING vs ARCHIVE) are defined in `standards/HOUSECARL_DOC_HYGIENE.md`.
 - **Don't re-import the legacy lock-down.** The old repo's heavy guardrails are part of what we left behind. New guardrails earn their place from real need.
 - **Don't "improve" the legacy repo.** `Housecarl [Legacy]/` is frozen reference — read it, don't touch it.
+
+---
+
+*Local fork note (justty32/houseCARL)：本 fork 另加 `wf/` 工作流骨架，入口在 [AGENTS.md](AGENTS.md) 的「Local fork layer」段；本檔其餘內容是上游原文。*

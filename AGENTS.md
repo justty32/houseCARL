@@ -75,3 +75,23 @@ Reviewing a change to houseCARL — human's or agent's — check, in priority or
 
 Be concrete and candid: name the file and line, say what's wrong and why, and prefer surfacing a
 real doubt over a tidy approval.
+
+## Local fork layer — 本 fork 的 wf/ 工作流（上游沒有）
+
+本段與 `wf/` 是 `justty32/houseCARL` fork 加的；上面各段與 [`CLAUDE.md`](CLAUDE.md) 是上游原文，**原意不動，衝突以上游為準**。
+
+- 開場先跑 `grep -c '^- \[' wf/SESSION-LOG.md`：非 0 才開 [SESSION-LOG.md](wf/SESSION-LOG.md)；等使用者的項記母 repo [WAIT_USER.md](../../WAIT_USER.md)（本 repo 不另開）。
+<!-- wf-insert:AGENTS -->
+- **碰原始碼前**：慣例與 code map → [conventions](wf/workflows/common/conventions.md)、[code-map](wf/workflows/common/code-map.md)；環境與指令 → [dev-env](wf/workflows/dev-env.md)。
+- **要你動手做事** → [WORKFLOWS.md](wf/WORKFLOWS.md) 依意圖派發，再讀該工作流入口檔。
+- **想看專案結構** → [INDEX.md](wf/INDEX.md)。
+- 使用者偏好與邊界 → [user.md](wf/workflows/common/user.md)。
+
+鐵律（always-on，補在上游規矩之外）：
+
+1. 重構 / 整理**不改原意**：開發＝行為不變且驗證綠燈（[testing](wf/workflows/testing.md)：`dotnet build housecarl.sln`＋相關 guard，在 worktree 跑）；非開發＝原意不變，照 `Done when:` 驗收。
+2. **不可逆或對外的動作**（push、刪除、對外送出、對上游開 issue／PR、重 publish 已安裝的 server）要有**授權來源**：使用者當場確認，或他親自登記在清單裡。都沒有就先問。
+3. **條列走資料檔、導航留 md**：給 AI 消化的表／清單 >1 KB 存 `.json`／`.csv`（契約 `wf-table/1`，見 [data-files](wf/workflows/common/data-files.md)），用 `wf/tools/tabledb.py` 讀寫；給人點的導航連結留 md。
+4. **具體流程**在各工作流入口檔，不在頂層。
+
+<!-- wf-kernel v0.6+368468a (2026-10-26 導入) -->
